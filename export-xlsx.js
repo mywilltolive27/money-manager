@@ -72,20 +72,30 @@
       summaryRows.push({ Month: 'TOTAL', ...tot });
     }
 
-    const cats = Array.from(new Set(txs.map((t) => t.category))).sort();
+    // Expenses only, one row per category, one column per month + Total, then a TOTAL row.
+    const expenseTx = txs.filter((t) => t.type === 'expense');
+    const cats = Array.from(new Set(expenseTx.map((t) => t.category))).sort();
+    const spentIn = (c, k) =>
+      expenseTx
+        .filter((t) => t.category === c && t.date.slice(0, 7) === k)
+        .reduce((s, t) => s + Number(t.amount), 0);
     const categoryRows = cats.map((c) => {
       const row = { Category: c };
       let total = 0;
-      months.forEach((k) => {
-        const v = txs
-          .filter((t) => t.category === c && t.date.slice(0, 7) === k)
-          .reduce((s, t) => s + Number(t.amount), 0);
-        row[k] = v;
-        total += v;
-      });
+      months.forEach((k) => { row[k] = spentIn(c, k); total += row[k]; });
       row.Total = total;
       return row;
     });
+    if (categoryRows.length) {
+      const totalRow = { Category: 'TOTAL' };
+      let grand = 0;
+      months.forEach((k) => {
+        totalRow[k] = cats.reduce((s, c) => s + spentIn(c, k), 0);
+        grand += totalRow[k];
+      });
+      totalRow.Total = grand;
+      categoryRows.push(totalRow);
+    }
 
     const wb = XLSX.utils.book_new();
 
@@ -103,7 +113,7 @@
       const wsCat = XLSX.utils.json_to_sheet(categoryRows);
       wsCat['!cols'] = [{ wch: 18 }].concat(months.map(() => ({ wch: 11 })), [{ wch: 12 }]);
       formatCols(wsCat, months.concat(['Total']));
-      XLSX.utils.book_append_sheet(wb, wsCat, 'By Category');
+      XLSX.utils.book_append_sheet(wb, wsCat, 'Expenses by Category');
     }
 
     return { wb, months, count: txs.length };
