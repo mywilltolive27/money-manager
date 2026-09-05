@@ -186,5 +186,5 @@ it was built to validate the UI/UX quickly.
 
 - `index.html` — the working phase-1 prototype
 - `manifest.json` — PWA manifest (already linked from `index.html`);
-  needs real icon files added before phase 2 install testing
+  icons added (`icon.svg`, `icon-192.png`, `icon-512.png`, `icon-180.png`)
 - `ARCHITECTURE.md` — this document
