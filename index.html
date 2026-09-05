@@ -87,10 +87,11 @@
     font-family:var(--font-display); font-weight:600; font-size:20px; min-width:180px; text-align:center;
   }
   .summary-strip{
-    display:grid; grid-template-columns:repeat(3,1fr); gap:1px;
+    display:grid; grid-template-columns:repeat(2,1fr); gap:1px;
     background:var(--line); border:1px solid var(--line); border-radius:var(--radius);
     overflow:hidden; margin-bottom:20px;
   }
+  @media(min-width:560px){ .summary-strip{ grid-template-columns:repeat(4,1fr); } }
   .summary-strip .cell{
     background:var(--paper-raised); padding:14px 16px;
   }
@@ -208,6 +209,7 @@
     <div class="cell"><div class="label">Income</div><div class="val income" id="sumIncome">₹0</div></div>
     <div class="cell"><div class="label">Expenses</div><div class="val expense" id="sumExpense">₹0</div></div>
     <div class="cell"><div class="label">Surplus</div><div class="val" id="sumSurplus">₹0</div></div>
+    <div class="cell"><div class="label">Living expenses</div><div class="val expense" id="sumLiving">₹0</div></div>
   </div>
 
   <div class="layout">
@@ -329,6 +331,7 @@
 <script>
 const STORAGE_KEY = 'ledgerAppData';
 const PALETTE = ['#6B8CAE','#C1704A','#7A9B76','#A9739A','#B8873B','#5B8C88','#9A6B6B','#7A7AA9','#8A9A5B','#AA8866','#5B8CA0','#A05B7A'];
+const NON_LIVING_CATEGORIES = ['EMI', 'Savings-Mandatory', 'Savings-Optional'];
 
 function defaultData(){
   const cats = [
@@ -435,6 +438,11 @@ function render(){
   const surplusEl = $('#sumSurplus');
   surplusEl.textContent = fmtMoney(surplus);
   surplusEl.className = 'val ' + (surplus >= 0 ? 'income' : 'expense');
+
+  const living = txs
+    .filter(t => t.type === 'expense' && !NON_LIVING_CATEGORIES.includes(t.category))
+    .reduce((s,t) => s + Number(t.amount), 0);
+  $('#sumLiving').textContent = fmtMoney(living);
 
   renderTxList(txs);
   renderChart(txs);
