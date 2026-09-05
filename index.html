@@ -12,6 +12,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 <script src="https://accounts.google.com/gsi/client" async></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root{
     --ink:#1E2A28;
@@ -244,6 +245,7 @@
       <div class="card">
         <h2>Backup</h2>
         <div class="file-actions">
+          <button class="btn ghost small" id="exportXlsxBtn">Export to Excel</button>
           <button class="btn ghost small" id="exportBtn">Export JSON</button>
           <button class="btn ghost small" id="importBtn">Import JSON</button>
           <input type="file" id="importFile" accept="application/json" style="display:none">
@@ -283,6 +285,25 @@
     </div>
     <div class="modal-actions">
       <button class="btn" id="catDone">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Export to Excel Modal -->
+<div class="overlay" id="xlsxOverlay">
+  <div class="modal">
+    <h3>Export to Excel</h3>
+    <div class="field"><label>From month</label><input type="month" id="xlsxFrom"></div>
+    <div class="field"><label>To month</label><input type="month" id="xlsxTo"></div>
+    <div class="field"><label>Format</label>
+      <select id="xlsxFormat">
+        <option value="xlsx">Excel Workbook (.xlsx)</option>
+        <option value="xls">Excel 97–2003 (.xls)</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="xlsxCancel">Cancel</button>
+      <button class="btn" id="xlsxDownload">Download</button>
     </div>
   </div>
 </div>
@@ -660,6 +681,7 @@ document.querySelectorAll('.overlay').forEach(ov=>{
 // Bridge for auth.js / sync.js (Phase 2 — Google Drive sync)
 window.LedgerCore = {
   get data(){ return data; },
+  get viewMonth(){ return monthKey(viewDate); },
   replaceData(newData){
     data = newData;
     data.categories = data.categories || defaultData().categories;
@@ -675,5 +697,6 @@ render();
 </script>
 <script src="auth.js"></script>
 <script src="sync.js"></script>
+<script src="export-xlsx.js"></script>
 </body>
 </html>
