@@ -179,7 +179,7 @@ it was built to validate the UI/UX quickly.
 | Phase | What | Status |
 |---|---|---|
 | 1 | Local-only prototype (this repo's `index.html`) | ✅ done |
-| 2 | Host on GitHub Pages, add Google sign-in + Drive sync | Not started |
+| 2 | Host on GitHub Pages, add Google sign-in + Drive sync | 🚧 in progress |
 | 3 | Excel import, refined budget logic, recurring transactions | Not started |
 
 ## 8. Files in this handoff

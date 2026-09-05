@@ -9,6 +9,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async></script>
 <style>
   :root{
     --ink:#1E2A28;
@@ -188,7 +189,10 @@
 <div class="wrap">
   <header class="app-head">
     <h1>Ledger</h1>
-    <div class="tag">local · this device only</div>
+    <div style="text-align:right;">
+      <button class="btn ghost small" id="syncBtn">Sign in to sync</button>
+      <div class="tag" id="syncTag" style="margin-top:4px;">local · this device only</div>
+    </div>
   </header>
 
   <div class="month-nav">
@@ -322,7 +326,12 @@ function loadData(){
     return JSON.parse(raw);
   }catch(e){ const d = defaultData(); saveData(d); return d; }
 }
-function saveData(d){ localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); }
+function saveDataLocalOnly(d){ localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); }
+function saveData(d){
+  d.updatedAt = Date.now();
+  saveDataLocalOnly(d);
+  if(window.LedgerSync) window.LedgerSync.onLocalChange();
+}
 
 let data = loadData();
 let viewDate = new Date();
@@ -646,7 +655,23 @@ document.querySelectorAll('.overlay').forEach(ov=>{
   ov.addEventListener('click', (e)=>{ if(e.target === ov) ov.classList.remove('open'); });
 });
 
+// Bridge for auth.js / sync.js (Phase 2 — Google Drive sync)
+window.LedgerCore = {
+  get data(){ return data; },
+  replaceData(newData){
+    data = newData;
+    data.categories = data.categories || defaultData().categories;
+    data.transactions = data.transactions || [];
+    data.budgets = data.budgets || {};
+    saveDataLocalOnly(data);
+    render();
+  },
+  render
+};
+
 render();
 </script>
+<script src="auth.js"></script>
+<script src="sync.js"></script>
 </body>
 </html>
