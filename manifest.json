@@ -1,0 +1,9 @@
+{
+  "name": "Ledger — Money manager Expenses",
+  "short_name": "Ledger",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#F1F0EB",
+  "theme_color": "#1E2A28",
+  "icons": []
+}
