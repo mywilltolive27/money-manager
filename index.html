@@ -267,6 +267,12 @@
     <div class="field"><label>Amount (₹)</label><input type="number" step="0.01" id="txAmount" placeholder="0.00"></div>
     <div class="field"><label>Description</label><input type="text" id="txDesc" placeholder="e.g. Groceries"></div>
     <div class="field"><label>Category</label><select id="txCategory"></select></div>
+    <div class="field">
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer; text-transform:none; letter-spacing:0;">
+        <input type="checkbox" id="txRecurring" style="width:auto;">
+        Repeat this every month
+      </label>
+    </div>
     <div class="modal-actions">
       <button class="btn ghost" id="txCancel">Cancel</button>
       <button class="btn" id="txSave">Save</button>
@@ -375,7 +381,50 @@ function txForMonth(){
   return data.transactions.filter(t => t.date.slice(0,7) === key);
 }
 
+// For every recurring series, backfill missing monthly instances up through
+// whichever is later: today's month, or the month currently being viewed
+// (so navigating forward, or just letting time pass, "creates" the entry).
+// Each new date reuses the day-of-month of the series' *original* (earliest)
+// transaction, clamped to the target month's length — so a 31st-of-the-month
+// series that gets clamped to Feb 28 still returns to the 31st in March,
+// instead of drifting permanently to 28.
+function ensureRecurringInstances(){
+  const targetKey = [monthKey(new Date()), monthKey(viewDate)].sort().pop();
+  // Key off the most recent transaction in each series regardless of its
+  // recurring flag, so unchecking "recurring" on the latest instance stops
+  // the series even if an earlier instance is still flagged recurring.
+  const bySeries = {};
+  data.transactions.forEach(t=>{
+    if(!t.seriesId) return;
+    const s = bySeries[t.seriesId] || (bySeries[t.seriesId] = { latest: t, first: t });
+    if(t.date > s.latest.date) s.latest = t;
+    if(t.date < s.first.date) s.first = t;
+  });
+  let changed = false;
+  Object.values(bySeries).forEach(({ latest, first })=>{
+    if(!latest.recurring) return;
+    const anchorDay = Number(first.date.slice(8, 10));
+    let [y, m] = latest.date.slice(0, 7).split('-').map(Number);
+    let guard = 0;
+    while(`${y}-${String(m).padStart(2,'0')}` < targetKey && guard++ < 600){
+      if(++m > 12){ m = 1; y++; }
+      const lastDay = new Date(y, m, 0).getDate();
+      const day = Math.min(anchorDay, lastDay);
+      const date = `${y}-${String(m).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+      data.transactions.push({
+        id: 'tx_'+Date.now()+'_'+Math.random().toString(36).slice(2,7),
+        date, amount: latest.amount, description: latest.description,
+        category: latest.category, type: latest.type,
+        recurring: true, seriesId: latest.seriesId,
+      });
+      changed = true;
+    }
+  });
+  if(changed) saveData(data);
+}
+
 function render(){
+  ensureRecurringInstances();
   $('#monthLabel').textContent = monthLabelStr(viewDate);
   const txs = txForMonth();
   const income = txs.filter(t=>t.type==='income').reduce((s,t)=>s+Number(t.amount),0);
@@ -419,8 +468,8 @@ function renderTxList(txs){
       row.innerHTML = `
         <div class="dot" style="background:${cat ? cat.color : '#999'}"></div>
         <div class="tx-main">
-          <div class="tx-desc">${escapeHtml(t.description || t.category)}</div>
-          <div class="tx-meta">${escapeHtml(t.category)}</div>
+          <div class="tx-desc">${escapeHtml(t.description || t.category)}${t.recurring ? ' <span title="Repeats every month" style="opacity:.6;">&#8635;</span>' : ''}</div>
+          <div class="tx-meta">${escapeHtml(t.category)}${t.recurring ? ' · recurring' : ''}</div>
         </div>
         <div class="tx-amt ${t.type}">${t.type==='expense'?'−':'+'}${fmtMoney(t.amount)}</div>
         <div class="tx-actions">
@@ -534,6 +583,7 @@ function openTxModal(id){
     $('#txDesc').value = t.description;
     populateCategorySelect();
     $('#txCategory').value = t.category;
+    $('#txRecurring').checked = !!t.recurring;
   } else {
     $('#txModalTitle').textContent = 'Add transaction';
     setType('expense');
@@ -546,6 +596,7 @@ function openTxModal(id){
     $('#txAmount').value = '';
     $('#txDesc').value = '';
     populateCategorySelect();
+    $('#txRecurring').checked = false;
   }
   overlay.classList.add('open');
 }
@@ -561,13 +612,18 @@ $('#txSave').onclick = () => {
   const amount = parseFloat($('#txAmount').value);
   const description = $('#txDesc').value.trim();
   const category = $('#txCategory').value;
+  const recurring = $('#txRecurring').checked;
   if(!date || isNaN(amount) || !category){ alert('Please fill in date, amount, and category.'); return; }
 
   if(editingTxId){
     const t = data.transactions.find(x=>x.id===editingTxId);
-    Object.assign(t, {date, amount, description, category, type:currentType});
+    Object.assign(t, {date, amount, description, category, type:currentType, recurring});
+    if(recurring && !t.seriesId) t.seriesId = t.id;
   } else {
-    data.transactions.push({ id: 'tx_'+Date.now()+'_'+Math.random().toString(36).slice(2,7), date, amount, description, category, type:currentType });
+    const id = 'tx_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
+    const tx = { id, date, amount, description, category, type:currentType, recurring };
+    if(recurring) tx.seriesId = id;
+    data.transactions.push(tx);
   }
   saveData(data);
   closeTxModal();
