@@ -333,30 +333,71 @@ const STORAGE_KEY = 'ledgerAppData';
 const PALETTE = ['#6B8CAE','#C1704A','#7A9B76','#A9739A','#B8873B','#5B8C88','#9A6B6B','#7A7AA9','#8A9A5B','#AA8866','#5B8CA0','#A05B7A'];
 const NON_LIVING_CATEGORIES = ['EMI', 'Savings-Mandatory', 'Savings-Optional'];
 
+function slugify(s){
+  return String(s).toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || 'cat';
+}
+function uid(prefix){ return prefix+'_'+Date.now()+'_'+Math.random().toString(36).slice(2,7); }
+
 function defaultData(){
-  const cats = [
-    {name:'Utilities', color:PALETTE[0], type:'expense'},
-    {name:'Food', color:PALETTE[1], type:'expense'},
-    {name:'Groceries', color:PALETTE[2], type:'expense'},
-    {name:'Personal', color:PALETTE[3], type:'expense'},
-    {name:'Transportation', color:PALETTE[4], type:'expense'},
-    {name:'Travel', color:PALETTE[5], type:'expense'},
-    {name:'Home', color:PALETTE[6], type:'expense'},
-    {name:'EMI', color:PALETTE[7], type:'expense'},
-    {name:'Entertainment', color:PALETTE[8], type:'expense'},
-    {name:'Savings-Mandatory', color:PALETTE[9], type:'expense'},
-    {name:'Savings-Optional', color:PALETTE[10], type:'expense'},
-    {name:'Paycheck', color:PALETTE[11], type:'income'},
-  ];
+  const names = ['Utilities','Food','Groceries','Personal','Transportation','Travel','Home','EMI','Entertainment','Savings-Mandatory','Savings-Optional'];
+  const cats = names.map((name,i)=>({ id: slugify(name), name, color: PALETTE[i], type:'expense', updatedAt: Date.now() }));
+  cats.push({ id: slugify('Paycheck'), name:'Paycheck', color: PALETTE[11], type:'income', updatedAt: Date.now() });
   return { categories:cats, transactions:[], budgets:{} };
 }
 
+// Bring older saved data up to the current shape: a stable id on every
+// category (derived from its original name, so two devices independently
+// assign the same id to "the same" category), a per-record `updatedAt` on
+// every category/transaction, and {amount, updatedAt} for budgets (used to
+// be a bare number). This per-record timestamp is what lets sync.js merge
+// two copies of the data field-by-field instead of picking one whole file
+// over the other (see sync.js).
+function migrateData(d){
+  d.categories = d.categories || [];
+  d.transactions = d.transactions || [];
+  d.budgets = d.budgets || {};
+  const usedIds = {};
+  d.categories.forEach(c=>{
+    if(!c.id){
+      let base = slugify(c.name), id = base, n = 2;
+      while(usedIds[id]) id = base + '-' + (n++);
+      c.id = id;
+    }
+    usedIds[c.id] = true;
+    if(!c.updatedAt) c.updatedAt = d.updatedAt || Date.now();
+  });
+  d.transactions.forEach(t=>{
+    if(!t.updatedAt) t.updatedAt = d.updatedAt || Date.now();
+  });
+  Object.keys(d.budgets).forEach(k=>{
+    const b = d.budgets[k];
+    if(typeof b === 'number') d.budgets[k] = { amount: b, updatedAt: d.updatedAt || Date.now() };
+    else if(!b.updatedAt) b.updatedAt = d.updatedAt || Date.now();
+  });
+  pruneTombstones(d);
+  return d;
+}
+
+// A delete just flags {deleted:true, deletedAt} instead of removing the
+// record, so the delete itself can propagate through a merge (otherwise a
+// still-present copy on the other device would simply resurrect it next
+// sync). Tombstones older than this are dropped so the file doesn't grow
+// forever.
+function pruneTombstones(d){
+  const cutoff = Date.now() - 180*24*60*60*1000;
+  d.transactions = d.transactions.filter(t => !(t.deleted && t.deletedAt && t.deletedAt < cutoff));
+  d.categories = d.categories.filter(c => !(c.deleted && c.deletedAt && c.deletedAt < cutoff));
+}
+
 function loadData(){
+  let d;
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
-    if(!raw) { const d = defaultData(); saveData(d); return d; }
-    return JSON.parse(raw);
-  }catch(e){ const d = defaultData(); saveData(d); return d; }
+    d = raw ? JSON.parse(raw) : defaultData();
+  }catch(e){ d = defaultData(); }
+  migrateData(d);
+  saveDataLocalOnly(d);
+  return d;
 }
 function saveDataLocalOnly(d){ localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); }
 function saveData(d){
@@ -377,11 +418,11 @@ const monthKey = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0
 const fmtMoney = n => '₹' + Number(n||0).toLocaleString('en-IN', {maximumFractionDigits:0});
 const monthLabelStr = d => d.toLocaleDateString('en-IN', {month:'long', year:'numeric'});
 
-function catByName(name){ return data.categories.find(c => c.name === name); }
+function catByName(name){ return data.categories.find(c => c.name === name && !c.deleted); }
 
 function txForMonth(){
   const key = monthKey(viewDate);
-  return data.transactions.filter(t => t.date.slice(0,7) === key);
+  return data.transactions.filter(t => !t.deleted && t.date.slice(0,7) === key);
 }
 
 // For every recurring series, backfill missing monthly instances up through
@@ -391,35 +432,50 @@ function txForMonth(){
 // transaction, clamped to the target month's length — so a 31st-of-the-month
 // series that gets clamped to Feb 28 still returns to the 31st in March,
 // instead of drifting permanently to 28.
+//
+// Generated ids are deterministic (seriesId + target month), not random —
+// so if two devices both generate "October's rent" before either has synced,
+// they produce the *same* id and sync.js's per-id merge collapses them into
+// one record instead of creating a duplicate.
 function ensureRecurringInstances(){
   const targetKey = [monthKey(new Date()), monthKey(viewDate)].sort().pop();
-  // Key off the most recent transaction in each series regardless of its
-  // recurring flag, so unchecking "recurring" on the latest instance stops
-  // the series even if an earlier instance is still flagged recurring.
-  const bySeries = {};
+  const series = {};
   data.transactions.forEach(t=>{
     if(!t.seriesId) return;
-    const s = bySeries[t.seriesId] || (bySeries[t.seriesId] = { latest: t, first: t });
-    if(t.date > s.latest.date) s.latest = t;
-    if(t.date < s.first.date) s.first = t;
+    (series[t.seriesId] = series[t.seriesId] || []).push(t);
   });
   let changed = false;
-  Object.values(bySeries).forEach(({ latest, first })=>{
-    if(!latest.recurring) return;
+  Object.keys(series).forEach(sid=>{
+    const list = series[sid];
+    const active = list.filter(t=>!t.deleted);
+    if(!active.length) return;
+    // "still recurring" = the most recent *non-deleted* instance says so —
+    // so unchecking recurring on the latest instance stops the series even
+    // if an earlier instance is still flagged recurring, and deleting a
+    // single month's instance doesn't kill the whole series.
+    const latestActive = active.reduce((a,b)=> b.date > a.date ? b : a);
+    if(!latestActive.recurring) return;
+    const first = list.reduce((a,b)=> b.date < a.date ? b : a);
     const anchorDay = Number(first.date.slice(8, 10));
-    let [y, m] = latest.date.slice(0, 7).split('-').map(Number);
+    // Months that already have an instance (even a deleted one) are left
+    // alone, so a deliberately-deleted month doesn't get resurrected.
+    const existingMonths = new Set(list.map(t=>t.date.slice(0,7)));
+    let [y, m] = latestActive.date.slice(0, 7).split('-').map(Number);
     let guard = 0;
     while(`${y}-${String(m).padStart(2,'0')}` < targetKey && guard++ < 600){
       if(++m > 12){ m = 1; y++; }
+      const key = `${y}-${String(m).padStart(2,'0')}`;
+      if(existingMonths.has(key)) continue;
       const lastDay = new Date(y, m, 0).getDate();
       const day = Math.min(anchorDay, lastDay);
-      const date = `${y}-${String(m).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
       data.transactions.push({
-        id: 'tx_'+Date.now()+'_'+Math.random().toString(36).slice(2,7),
-        date, amount: latest.amount, description: latest.description,
-        category: latest.category, type: latest.type,
-        recurring: true, seriesId: latest.seriesId,
+        id: sid + '_' + key,
+        date: `${key}-${String(day).padStart(2,'0')}`,
+        amount: latestActive.amount, description: latestActive.description,
+        category: latestActive.category, type: latestActive.type,
+        recurring: true, seriesId: sid, updatedAt: Date.now(),
       });
+      existingMonths.add(key);
       changed = true;
     }
   });
@@ -532,7 +588,7 @@ function renderChart(txs){
 function renderCatList(){
   const el = $('#catList');
   el.innerHTML = '';
-  data.categories.forEach(c=>{
+  data.categories.filter(c=>!c.deleted).forEach(c=>{
     const item = document.createElement('div');
     item.className = 'item';
     item.innerHTML = `<span class="dot" style="background:${c.color}"></span>${c.name}`;
@@ -542,7 +598,7 @@ function renderCatList(){
 
 function renderBudget(expense){
   const key = monthKey(viewDate);
-  const budget = data.budgets[key] || 0;
+  const budget = (data.budgets[key] && data.budgets[key].amount) || 0;
   $('#budgetActual').textContent = fmtMoney(expense) + ' spent';
   $('#budgetTotal').textContent = 'of ' + fmtMoney(budget);
   const pct = budget > 0 ? Math.min(100, (expense/budget)*100) : 0;
@@ -565,7 +621,7 @@ $('#nextMonth').onclick = () => { viewDate.setMonth(viewDate.getMonth()+1); rend
 function populateCategorySelect(){
   const sel = $('#txCategory');
   sel.innerHTML = '';
-  data.categories.filter(c=>c.type===currentType).forEach(c=>{
+  data.categories.filter(c=>c.type===currentType && !c.deleted).forEach(c=>{
     const opt = document.createElement('option');
     opt.value = c.name; opt.textContent = c.name;
     sel.appendChild(opt);
@@ -625,11 +681,11 @@ $('#txSave').onclick = () => {
 
   if(editingTxId){
     const t = data.transactions.find(x=>x.id===editingTxId);
-    Object.assign(t, {date, amount, description, category, type:currentType, recurring});
+    Object.assign(t, {date, amount, description, category, type:currentType, recurring, updatedAt: Date.now()});
     if(recurring && !t.seriesId) t.seriesId = t.id;
   } else {
-    const id = 'tx_'+Date.now()+'_'+Math.random().toString(36).slice(2,7);
-    const tx = { id, date, amount, description, category, type:currentType, recurring };
+    const id = uid('tx');
+    const tx = { id, date, amount, description, category, type:currentType, recurring, updatedAt: Date.now() };
     if(recurring) tx.seriesId = id;
     data.transactions.push(tx);
   }
@@ -640,7 +696,9 @@ $('#txSave').onclick = () => {
 
 function deleteTx(id){
   if(!confirm('Delete this transaction?')) return;
-  data.transactions = data.transactions.filter(t=>t.id!==id);
+  const t = data.transactions.find(x=>x.id===id);
+  if(!t) return;
+  t.deleted = true; t.deletedAt = Date.now(); t.updatedAt = Date.now();
   saveData(data);
   render();
 }
@@ -653,7 +711,7 @@ function openCatModal(){
 function renderCatManageList(){
   const el = $('#catManageList');
   el.innerHTML = '';
-  data.categories.forEach((c,idx)=>{
+  data.categories.filter(c=>!c.deleted).forEach(c=>{
     const row = document.createElement('div');
     row.className = 'cat-manage-row';
     row.innerHTML = `
@@ -661,18 +719,19 @@ function renderCatManageList(){
       <input type="text" value="${escapeHtml(c.name)}">
       <span style="font-size:11px; color:var(--text-muted); font-family:var(--font-mono);">${c.type}</span>
       <button class="icon-btn del-cat-btn" title="Delete">&#10005;</button>`;
-    row.querySelector('input[type=color]').oninput = (e) => { c.color = e.target.value; saveData(data); };
+    row.querySelector('input[type=color]').oninput = (e) => { c.color = e.target.value; c.updatedAt = Date.now(); saveData(data); };
     row.querySelector('input[type=text]').onchange = (e) => {
       const oldName = c.name, newName = e.target.value.trim();
       if(!newName) { e.target.value = oldName; return; }
-      data.transactions.forEach(t => { if(t.category === oldName) t.category = newName; });
-      c.name = newName;
+      const now = Date.now();
+      data.transactions.forEach(t => { if(t.category === oldName){ t.category = newName; t.updatedAt = now; } });
+      c.name = newName; c.updatedAt = now;
       saveData(data);
     };
     row.querySelector('.del-cat-btn').onclick = () => {
-      const inUse = data.transactions.some(t=>t.category===c.name);
+      const inUse = data.transactions.some(t=>!t.deleted && t.category===c.name);
       if(inUse && !confirm(`"${c.name}" is used by existing transactions. Delete anyway? Those entries will keep the old category name.`)) return;
-      data.categories.splice(idx,1);
+      c.deleted = true; c.deletedAt = Date.now(); c.updatedAt = Date.now();
       saveData(data);
       renderCatManageList();
       render();
@@ -686,8 +745,12 @@ $('#addCatBtn').onclick = () => {
   const input = $('#newCatName');
   const name = input.value.trim();
   if(!name) return;
-  const color = PALETTE[data.categories.length % PALETTE.length];
-  data.categories.push({name, color, type:'expense'});
+  const active = data.categories.filter(c=>!c.deleted);
+  const color = PALETTE[active.length % PALETTE.length];
+  const usedIds = new Set(data.categories.map(c=>c.id));
+  let base = slugify(name), id = base, n = 2;
+  while(usedIds.has(id)) id = base + '-' + (n++);
+  data.categories.push({ id, name, color, type:'expense', updatedAt: Date.now() });
   saveData(data);
   input.value = '';
   renderCatManageList();
@@ -696,13 +759,14 @@ $('#addCatBtn').onclick = () => {
 // Budget
 $('#editBudgetBtn').onclick = () => {
   $('#budgetMonthLabel').textContent = monthLabelStr(viewDate);
-  $('#budgetInput').value = data.budgets[monthKey(viewDate)] || '';
+  const b = data.budgets[monthKey(viewDate)];
+  $('#budgetInput').value = (b && b.amount) || '';
   $('#budgetOverlay').classList.add('open');
 };
 $('#budgetCancel').onclick = () => $('#budgetOverlay').classList.remove('open');
 $('#budgetSave').onclick = () => {
   const val = parseFloat($('#budgetInput').value) || 0;
-  data.budgets[monthKey(viewDate)] = val;
+  data.budgets[monthKey(viewDate)] = { amount: val, updatedAt: Date.now() };
   saveData(data);
   $('#budgetOverlay').classList.remove('open');
   render();
@@ -727,8 +791,8 @@ $('#importFile').onchange = (e) => {
       const imported = JSON.parse(reader.result);
       if(!imported.categories || !imported.transactions) throw new Error('bad format');
       if(!confirm('This will replace all current data with the imported file. Continue?')) return;
+      migrateData(imported);
       data = imported;
-      data.budgets = data.budgets || {};
       saveData(data);
       render();
     }catch(err){ alert('Could not read that file — is it a valid Ledger backup JSON?'); }
@@ -746,11 +810,10 @@ document.querySelectorAll('.overlay').forEach(ov=>{
 window.LedgerCore = {
   get data(){ return data; },
   get viewMonth(){ return monthKey(viewDate); },
+  migrate: migrateData,
   replaceData(newData){
     data = newData;
-    data.categories = data.categories || defaultData().categories;
-    data.transactions = data.transactions || [];
-    data.budgets = data.budgets || {};
+    migrateData(data);
     saveDataLocalOnly(data);
     render();
   },

@@ -1,6 +1,11 @@
 // sync.js — Google Drive appDataFolder sync (Phase 2, see ARCHITECTURE.md 5.2/5.3)
 // Strategy: local cache is written first (instant, offline-safe); this module
-// mirrors it to a single hidden file in Drive. Last-write-wins by `updatedAt`.
+// merges it with the single hidden file in Drive on every sync (not just on
+// connect) — per record, by `updatedAt`, not by comparing one whole-file
+// timestamp. Whole-file last-write-wins would silently drop an entire edit
+// made on device A if device B pushed anything at all afterwards, even to a
+// different transaction; per-record merge means only a genuine edit to the
+// exact same record within the same debounce window can collide.
 window.LedgerSync = (function () {
   const FILE_NAME = 'ledger.json';
   const API = 'https://www.googleapis.com/drive/v3';
@@ -75,32 +80,63 @@ window.LedgerSync = (function () {
     fileId = (await res.json()).id;
   }
 
-  // One-time reconcile on connect: newer copy wins.
-  async function reconcile() {
-    await findFile();
-    const remote = await download();
-    const local = LedgerCore.data;
-    const rt = (remote && remote.updatedAt) || 0;
-    const lt = local.updatedAt || 0;
-    if (remote && rt > lt) {
-      LedgerCore.replaceData(remote);
-      return 'from Drive';
-    }
-    await upload(local);
-    return 'to Drive';
+  // Merge two arrays of records that each carry a stable `id` and an
+  // `updatedAt`: for every id, keep whichever side's record is newer (ties
+  // go to local). A record present on only one side is kept as-is — that's
+  // what makes a genuinely new entry on either device survive the merge,
+  // and (combined with delete-as-tombstone in index.html) what makes a
+  // delete on one device stick instead of being resurrected by the other.
+  function mergeById(localList, remoteList) {
+    const byId = new Map();
+    (remoteList || []).forEach((r) => byId.set(r.id, r));
+    (localList || []).forEach((l) => {
+      const r = byId.get(l.id);
+      if (!r || (l.updatedAt || 0) >= (r.updatedAt || 0)) byId.set(l.id, l);
+    });
+    return Array.from(byId.values());
   }
 
-  async function push() {
+  // Same idea for budgets, keyed by month instead of id.
+  function mergeBudgets(localB, remoteB) {
+    const out = Object.assign({}, remoteB);
+    Object.keys(localB || {}).forEach((k) => {
+      const l = localB[k], r = out[k];
+      if (!r || (l.updatedAt || 0) >= (r.updatedAt || 0)) out[k] = l;
+    });
+    return out;
+  }
+
+  function mergeData(local, remote) {
+    if (!remote) return local;
+    return {
+      categories: mergeById(local.categories, remote.categories),
+      transactions: mergeById(local.transactions, remote.transactions),
+      budgets: mergeBudgets(local.budgets, remote.budgets),
+      updatedAt: Date.now(),
+    };
+  }
+
+  // Pull whatever's on Drive, merge it into the local copy record-by-record,
+  // apply the merged result locally, then push the merged result back so
+  // both sides converge. Used both for the initial connect and for every
+  // debounced push after a local change — so a stale local copy (e.g. this
+  // device was offline while the other device made edits) gets reconciled
+  // before it overwrites anything.
+  async function syncNow() {
     if (!signedIn) return;
     if (syncing) { pendingWhileSyncing = true; return; }
     syncing = true;
     try {
       setStatus('syncing…');
       if (fileId === null) await findFile();
-      await upload(LedgerCore.data);
+      let remote = fileId ? await download() : null;
+      if (remote) LedgerCore.migrate(remote);
+      const merged = mergeData(LedgerCore.data, remote);
+      LedgerCore.replaceData(merged);
+      await upload(merged);
       setStatus('synced ' + nowTime());
     } catch (e) {
-      console.error('[sync] push failed', e);
+      console.error('[sync] failed', e);
       setStatus('offline — will retry');
     } finally {
       syncing = false;
@@ -115,7 +151,7 @@ window.LedgerSync = (function () {
     if (!signedIn) return;
     setStatus('changes pending…');
     clearTimeout(pushTimer);
-    pushTimer = setTimeout(push, PUSH_DEBOUNCE_MS);
+    pushTimer = setTimeout(syncNow, PUSH_DEBOUNCE_MS);
   }
 
   async function connect(interactive) {
@@ -125,9 +161,8 @@ window.LedgerSync = (function () {
       else await LedgerAuth.getToken();
       signedIn = true;
       updateBtn();
-      const dir = await reconcile();
-      setStatus('synced ' + dir + ' · ' + nowTime());
-      window.addEventListener('online', push);
+      await syncNow();
+      window.addEventListener('online', syncNow);
     } catch (e) {
       console.error('[sync] connect failed', e);
       signedIn = false;

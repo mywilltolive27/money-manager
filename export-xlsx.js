@@ -35,7 +35,7 @@
     const data = window.LedgerCore.data;
     const months = monthsBetween(fromM, toM);
     const txs = data.transactions
-      .filter((t) => { const k = t.date.slice(0, 7); return k >= fromM && k <= toM; })
+      .filter((t) => { const k = t.date.slice(0, 7); return !t.deleted && k >= fromM && k <= toM; })
       .sort((a, b) => a.date.localeCompare(b.date));
 
     const txRows = txs.map((t) => ({
@@ -56,7 +56,7 @@
         Income: income,
         Expenses: expenses,
         Surplus: income - expenses,
-        Budget: Number((data.budgets && data.budgets[k]) || 0),
+        Budget: Number((data.budgets && data.budgets[k] && data.budgets[k].amount) || 0),
       };
     });
     if (months.length > 1) {
